@@ -1,14 +1,15 @@
 import os
+import re
 import openpyxl
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 
-EXCEL_FILE = "inventory_sales.xlsx"
-TELEGRAM_TOKEN = "9104364470:AAFQxiPZuYBRvMgtpBDPQeSkzxpUZ31o_pU"  # আপনার বটের টোকেন দিন
+EXCEL_FILE = "salesbot.xlsx"
+TELEGRAM_TOKEN = "9104364470:AAFQxiPZuYBRvMgtpBDPQeSkzxpUZ31o_pU"  # Put your Telegram Bot Token here
 
 def initialize_excel():
-    """এক্সেল ফাইল না থাকলে নতুন তৈরি করবে"""
+    """Create the Excel file with headers if it doesn't exist"""
     if os.path.exists(EXCEL_FILE):
         return
     
@@ -16,7 +17,6 @@ def initialize_excel():
     ws_stock = wb.active
     ws_stock.title = "Daily_Inventory"
     
-    # হেডার তৈরি (Date & Time কলাম সহ)
     headers = ["Product ID", "Product Name", "Initial Stock", "Daily Sold", "Remaining Stock", "Last Updated Date & Time"]
     ws_stock.append(headers)
     
@@ -25,41 +25,50 @@ def initialize_excel():
     
     wb.save(EXCEL_FILE)
 
-# --- টেলিগ্রাম কমান্ড হ্যান্ডলার ---
+def extract_number(text):
+    """Extract numeric value from text like '2 box' or ' 03 ' -> 3"""
+    numbers = re.findall(r'\d+', str(text))
+    return int(numbers[0]) if numbers else 0
+
+def format_2digit(val):
+    """Format single digits as 2 digits (e.g., 3 -> '03', 0 -> '00')"""
+    try:
+        num = int(val)
+        return f"{num:02d}"
+    except (ValueError, TypeError):
+        return str(val)
+
+# --- Telegram Command Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "🤖 **স্মার্ট ইনভেন্টরি এআই অ্যাসিস্ট্যান্টে স্বাগতম!**\n\n"
-        "🆕 **একটি নতুন প্রোডাক্ট রেজিস্টার করতে:**\n"
-        "`/new_product [ID] [Name] [Initial_Stock]`\n"
-        "উদাহরণ: `/new_product 101 T-Shirt 50`\n\n"
-        "📦 **একসাথে একাধিক প্রোডাক্ট রেজিস্টার করতে:**\n"
-        "`/new_multiple 101,T-Shirt,50; 102,Jeans,30`\n\n"
-        "📥 **বিদ্যমান প্রোডাক্টে স্টক যোগ করতে:**\n"
-        "`/add [Product_ID] [Quantity]`\n"
-        "উদাহরণ: `/add 101 20`\n\n"
-        "🛒 **পণ্য বিক্রি হলে (Sales):**\n"
-        "`/sell [Product_ID] [Quantity]`\n"
-        "উদাহরণ: `/sell 101 5`\n\n"
-        "📊 **স্টক ও সেলস রিপোর্ট দেখতে:**\n"
-        "`/report`"
+        "🤖 **Welcome to Smart Inventory AI Assistant!**\n\n"
+        "🆕 **Register a single product:**\n"
+        "`/new_product [ID] [Name] [Stock]`\n"
+        "Example: `/new_product 01 Polo T-Shirt 50 box`\n\n"
+        "📦 **Register MULTIPLE products at once:**\n"
+        "`/new_multiple ID1,Name1,Stock1; ID2,Name2,Stock2`\n"
+        "Example:\n"
+        "`/new_multiple 01, Polo T-Shirt, 50 box; 02, Denim Jeans, 30 box`\n\n"
+        "✏️ **Edit product:** `/edit 01 Cotton Shirt 60 box`\n"
+        "🗑️ **Delete product:** `/delete 01`\n"
+        "📥 **Add Stock:** `/add 01 05 box`\n"
+        "🛒 **Record Sale:** `/sell 01 02 box`\n"
+        "📊 **View Report:** `/report`"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 async def register_new_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """নতুন প্রোডাক্ট রেজিস্টার (তারিখ ও সময়সহ)"""
+    """Register single product supporting multi-word names"""
     try:
         args = context.args
         if len(args) < 3:
-            await update.message.reply_text(
-                "❌ ভুল ফরম্যাট! সঠিক নিয়মে লিখুন:\n`/new_product [ID] [Name] [Stock]`", 
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text("❌ Format: `/new_product [ID] [Name] [Stock]`", parse_mode="Markdown")
             return
             
-        product_id = int(args[0])
-        product_name = args[1]
-        initial_stock = int(args[2])
+        product_id = extract_number(args[0])
+        product_name = " ".join(args[1:-1]).strip()
+        initial_stock = extract_number(args[-1])
         current_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
         
         initialize_excel()
@@ -68,7 +77,7 @@ async def register_new_product(update: Update, context: ContextTypes.DEFAULT_TYP
         
         for row in range(2, ws.max_row + 1):
             if ws.cell(row=row, column=1).value == product_id:
-                await update.message.reply_text(f"⚠️ এই প্রোডাক্ট আইডি ({product_id}) অলরেডি তালিকায় আছে!")
+                await update.message.reply_text(f"⚠️ Product ID ({format_2digit(product_id)}) already exists!")
                 return
         
         new_row_idx = ws.max_row + 1
@@ -82,25 +91,29 @@ async def register_new_product(update: Update, context: ContextTypes.DEFAULT_TYP
         wb.save(EXCEL_FILE)
         
         reply_msg = (
-            f"✅ **নতুন প্রোডাক্ট সফলভাবে যুক্ত হয়েছে!**\n"
-            f"🏷️ **নাম:** {product_name}\n"
-            f"🆔 **আইডি:** {product_id}\n"
-            f"📦 **প্রাথমিক স্টক:** {initial_stock} পিস\n"
-            f"⏰ **সময়:** {current_time}"
+            f"✅ **New Product Added Successfully!**\n"
+            f"🏷️ **Name:** {product_name}\n"
+            f"🆔 **ID:** {format_2digit(product_id)}\n"
+            f"📦 **Initial Stock:** {format_2digit(initial_stock)} boxes\n"
+            f"⏰ **Time:** {current_time}"
         )
         await update.message.reply_text(reply_msg, parse_mode="Markdown")
         
     except Exception as e:
-        await update.message.reply_text(f"⚠️ ত্রুটি ঘটেছে: {str(e)}")
+        await update.message.reply_text(f"⚠️ Error occurred: {str(e)}")
 
 async def register_multiple_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """একসাথে একাধিক প্রোডাক্ট রেজিস্টার (তারিখ ও সময়সহ)"""
+    """Register multiple products separated by semicolon (;), supporting spaces and 2-digit format"""
     try:
         full_text = update.message.text
         data_part = full_text.replace("/new_multiple", "").strip()
         
         if not data_part:
-            await update.message.reply_text("❌ উদাহরণ: `/new_multiple 101,T-Shirt,50; 102,Jeans,30`", parse_mode="Markdown")
+            await update.message.reply_text(
+                "❌ Correct Format Example:\n"
+                "`/new_multiple 01, Polo T-Shirt, 50 box; 02, Jeans, 30 box`",
+                parse_mode="Markdown"
+            )
             return
 
         initialize_excel()
@@ -120,10 +133,12 @@ async def register_multiple_products(update: Update, context: ContextTypes.DEFAU
             if len(parts) < 3:
                 continue
                 
-            product_id = int(parts[0].strip())
-            product_name = parts[1].strip()
-            initial_stock = int(parts[2].strip())
+            product_id = extract_number(parts[0].strip())
+            # মাঝের অংশগুলোর স্পেস ঠিক রেখে নাম তৈরি করা
+            product_name = ",".join(parts[1:-1]).strip()
+            initial_stock = extract_number(parts[-1].strip())
             
+            # ডুপ্লিকেট আইডি চেক করা
             exists = False
             for row in range(2, ws.max_row + 1):
                 if ws.cell(row=row, column=1).value == product_id:
@@ -141,21 +156,100 @@ async def register_multiple_products(update: Update, context: ContextTypes.DEFAU
                 success_count += 1
 
         wb.save(EXCEL_FILE)
-        await update.message.reply_text(f"✅ **{success_count}টি** প্রোডাক্ট সময়সহ ({current_time}) ইনভেন্টরিতে যুক্ত করা হয়েছে!")
+        await update.message.reply_text(f"✅ Successfully added **{format_2digit(success_count)}** products together at {current_time}!")
         
     except Exception as e:
-        await update.message.reply_text(f"⚠️ ত্রুটি ঘটেছে: {str(e)}")
+        await update.message.reply_text(f"⚠️ Error occurred: {str(e)}")
+
+async def edit_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Edit existing product name or initial stock"""
+    try:
+        args = context.args
+        if len(args) < 3:
+            await update.message.reply_text("❌ Format: `/edit [ID] [New_Name] [New_Stock]`", parse_mode="Markdown")
+            return
+            
+        product_id = extract_number(args[0])
+        new_name = " ".join(args[1:-1]).strip()
+        new_stock = extract_number(args[-1])
+        current_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+        
+        initialize_excel()
+        wb = openpyxl.load_workbook(EXCEL_FILE)
+        ws = wb["Daily_Inventory"]
+        
+        found = False
+        for row in range(2, ws.max_row + 1):
+            if ws.cell(row=row, column=1).value == product_id:
+                ws.cell(row=row, column=2, value=new_name)
+                ws.cell(row=row, column=3, value=new_stock)
+                ws.cell(row=row, column=6, value=current_time)
+                found = True
+                break
+                
+        if found:
+            wb.save(EXCEL_FILE)
+            reply_msg = (
+                f"✏️ **Product Updated Successfully!**\n"
+                f"🆔 **ID:** {format_2digit(product_id)}\n"
+                f"🏷️ **New Name:** {new_name}\n"
+                f"📦 **New Initial Stock:** {format_2digit(new_stock)} boxes\n"
+                f"⏰ **Time:** {current_time}"
+            )
+            await update.message.reply_text(reply_msg, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"❌ Product ID {format_2digit(product_id)} not found.")
+            
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error occurred: {str(e)}")
+
+async def delete_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a product row from inventory Excel sheet"""
+    try:
+        args = context.args
+        if len(args) < 1:
+            await update.message.reply_text("❌ Format: `/delete [ID]`", parse_mode="Markdown")
+            return
+            
+        product_id = extract_number(args[0])
+        
+        initialize_excel()
+        wb = openpyxl.load_workbook(EXCEL_FILE)
+        ws = wb["Daily_Inventory"]
+        
+        found = False
+        deleted_name = ""
+        for row in range(2, ws.max_row + 1):
+            if ws.cell(row=row, column=1).value == product_id:
+                deleted_name = ws.cell(row=row, column=2).value
+                ws.delete_rows(row)
+                found = True
+                break
+                
+        if found:
+            wb.save(EXCEL_FILE)
+            reply_msg = (
+                f"🗑️ **Product Deleted Successfully!**\n"
+                f"🏷️ **Name:** {deleted_name}\n"
+                f"🆔 **ID:** {format_2digit(product_id)}"
+            )
+            await update.message.reply_text(reply_msg, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"❌ Product ID {format_2digit(product_id)} not found.")
+            
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error occurred: {str(e)}")
 
 async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """স্টক আপডেট (তারিখ ও সময়সহ)"""
+    """Add stock to an existing product"""
     try:
         args = context.args
         if len(args) < 2:
-            await update.message.reply_text("❌ ভুল ফরম্যাট! সঠিক নিয়মে লিখুন: `/add 101 20`", parse_mode="Markdown")
+            await update.message.reply_text("❌ Format: `/add [ID] [Quantity]`", parse_mode="Markdown")
             return
             
-        product_id = int(args[0])
-        add_qty = int(args[1])
+        product_id = extract_number(args[0])
+        add_qty = extract_number(" ".join(args[1:]))
         current_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
         
         initialize_excel()
@@ -178,38 +272,37 @@ async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 remaining = new_initial - current_sold
                 ws.cell(row=row, column=6).value = current_time
-                
                 found = True
                 break
                 
         if found:
             wb.save(EXCEL_FILE)
             reply_msg = (
-                f"📥 **স্টক আপডেট সফল (Stock In)!**\n"
-                f"🏷️ **প্রোডাক্টের নাম:** {product_name}\n"
-                f"🆔 **আইডি:** {product_id}\n"
-                f"➕ **যোগ হয়েছে:** {add_qty} পিস\n"
-                f"📈 **মোট স্টক:** {new_initial} পিস\n"
-                f"📉 **অবশিষ্ট স্টক:** {remaining} পিস\n"
-                f"⏰ **আপডেটের সময়:** {current_time}"
+                f"📥 **Stock Updated (Stock In)!**\n"
+                f"🏷️ **Product:** {product_name}\n"
+                f"🆔 **ID:** {format_2digit(product_id)}\n"
+                f"➕ **Added:** {format_2digit(add_qty)} boxes\n"
+                f"📈 **Total Stock:** {format_2digit(new_initial)} boxes\n"
+                f"📉 **Remaining:** {format_2digit(remaining)} boxes\n"
+                f"⏰ **Time:** {current_time}"
             )
             await update.message.reply_text(reply_msg, parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ এই প্রোডাক্ট আইডি পাওয়া যায়নি।")
+            await update.message.reply_text(f"❌ Product ID {format_2digit(product_id)} not found.")
             
     except Exception as e:
-        await update.message.reply_text(f"⚠️ ত্রুটি ঘটেছে: {str(e)}")
+        await update.message.reply_text(f"⚠️ Error occurred: {str(e)}")
 
 async def sell_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """বিক্রি এন্ট্রি (তারিখ ও সময়সহ)"""
+    """Record a sale"""
     try:
         args = context.args
         if len(args) < 2:
-            await update.message.reply_text("❌ ভুল ফরম্যাট! সঠিক নিয়মে লিখুন: `/sell 101 5`", parse_mode="Markdown")
+            await update.message.reply_text("❌ Format: `/sell [ID] [Quantity]`", parse_mode="Markdown")
             return
             
-        product_id = int(args[0])
-        sold_qty = int(args[1])
+        product_id = extract_number(args[0])
+        sold_qty = extract_number(" ".join(args[1:]))
         current_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
         
         initialize_excel()
@@ -230,7 +323,7 @@ async def sell_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 new_sold = current_sold + sold_qty
                 
                 if new_sold > initial:
-                    await update.message.reply_text(f"⚠️ অপর্যাপ্ত স্টক! '{product_name}' এর মোট স্টক আছে {initial} পিস, কিন্তু বিক্রি দেখাতে চাচ্ছেন {new_sold} পিস।")
+                    await update.message.reply_text(f"⚠️ Insufficient stock! '{product_name}' has {format_2digit(initial)} boxes left.")
                     return
                 
                 ws.cell(row=row, column=4).value = new_sold
@@ -243,33 +336,33 @@ async def sell_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if found:
             wb.save(EXCEL_FILE)
             reply_msg = (
-                f"🛒 **বিক্রি সফলভাবে এন্ট্রি হয়েছে (Sales)!**\n"
-                f"🏷️ **প্রোডাক্টের নাম:** {product_name}\n"
-                f"🆔 **আইডি:** {product_id}\n"
-                f"➖ **বিক্রীত পরিমাণ:** {sold_qty} পিস\n"
-                f"📉 **অবশিষ্ট স্টক:** {remaining} পিস\n"
-                f"⏰ **বিক্রির সময়:** {current_time}"
+                f"🛒 **Sale Recorded Successfully!**\n"
+                f"🏷️ **Product:** {product_name}\n"
+                f"🆔 **ID:** {format_2digit(product_id)}\n"
+                f"➖ **Sold:** {format_2digit(sold_qty)} boxes\n"
+                f"📉 **Remaining:** {format_2digit(remaining)} boxes\n"
+                f"⏰ **Time:** {current_time}"
             )
             await update.message.reply_text(reply_msg, parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ এই প্রোডাক্ট আইডি পাওয়া যায়নি।")
+            await update.message.reply_text(f"❌ Product ID {format_2digit(product_id)} not found.")
             
     except Exception as e:
-        await update.message.reply_text(f"⚠️ ত্রুটি ঘটেছে: {str(e)}")
+        await update.message.reply_text(f"⚠️ Error occurred: {str(e)}")
 
 async def get_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """স্টক ও সেলস রিপোর্ট (সর্বশেষ সময়ের উল্লেখ সহ)"""
+    """View inventory & sales report in 2-digit format"""
     try:
         initialize_excel()
         wb = openpyxl.load_workbook(EXCEL_FILE)
         ws_stock = wb["Daily_Inventory"]
         
         if ws_stock.max_row <= 1:
-            await update.message.reply_text("📭 ইনভেন্টরি একদম খালি!")
+            await update.message.reply_text("📭 Inventory is empty!")
             return
             
         total_items_sold = 0
-        report_summary = "📊 **বর্তমান ইনভেন্টরি ও সেলস রিপোর্ট:**\n\n"
+        report_summary = "📊 **Current Inventory & Sales Report:**\n\n"
         
         for row in range(2, ws_stock.max_row + 1):
             p_id = ws_stock.cell(row=row, column=1).value
@@ -280,13 +373,17 @@ async def get_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last_time = ws_stock.cell(row=row, column=6).value or "N/A"
             
             total_items_sold += sold
-            report_summary += f"🔹 **{p_name}** (ID: {p_id})\n   - মোট স্টক: {initial} | বিক্রি: {sold}পিস | বাকি: {rem}পিস\n   - 🕒 শেষ আপডেট: {last_time}\n\n"
+            report_summary += (
+                f"🔹 **{p_name}** (ID: {format_2digit(p_id)})\n"
+                f"   - Initial: {format_2digit(initial)} | Sold: {format_2digit(sold)} | Remaining: {format_2digit(rem)} boxes\n"
+                f"   - 🕒 Last Updated: {last_time}\n\n"
+            )
             
-        report_summary += f"🔥 **সর্বমোট বিক্রীত পণ্য:** {total_items_sold} পিস"
+        report_summary += f"🔥 **Total Products Sold:** {format_2digit(total_items_sold)} boxes"
         await update.message.reply_text(report_summary, parse_mode="Markdown")
         
     except Exception as e:
-        await update.message.reply_text(f"⚠️ ত্রুটি ঘটেছে: {str(e)}")
+        await update.message.reply_text(f"⚠️ Error occurred: {str(e)}")
 
 def main():
     initialize_excel()
@@ -295,11 +392,13 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new_product", register_new_product))
     app.add_handler(CommandHandler("new_multiple", register_multiple_products))
+    app.add_handler(CommandHandler("edit", edit_product))
+    app.add_handler(CommandHandler("delete", delete_product))
     app.add_handler(CommandHandler("add", add_stock))
     app.add_handler(CommandHandler("sell", sell_product))
     app.add_handler(CommandHandler("report", get_report))
     
-    print("🤖 টেলিগ্রাম বট চালু হয়েছে (তারিখ ও সময় ফিচারসহ)...")
+    print("🤖 Telegram bot running with multiple product support, spaces, edit, delete & 2-digit formatting...")
     app.run_polling()
 
 if __name__ == "__main__":
