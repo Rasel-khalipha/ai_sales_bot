@@ -12,7 +12,7 @@ WEEKLY_REPORT_FILE = "Weekly_Sales_Report.xlsx"
 MONTHLY_REPORT_FILE = "Monthly_Sales_Report.xlsx"
 TELEGRAM_TOKEN = "9104364470:AAFQxiPZuYBRvMgtpBDPQeSkzxpUZ31o_pU"  # আপনার টেলিগ্রাম বট টোকেন এখানে দিন
 
-# --- রেন্ডার পোর্টের রিকোয়েস্ট সামলানোর জন্য ডামি সার্ভার ---
+# --- রেন্ডার পোর্টের রিকোয়েস্ট সামলানোর জন্য ডামি সার্ভার ---
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -193,6 +193,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📥 **Add Stock:** `/add [ID] [Qty+Unit]`\n"
         "🛒 **Sell Product:** `/sell [ID] [Qty+Unit]`\n"
         "✏️ **Edit Product:** `/edit [ID] [Name] [Stock+Unit] [Price]`\n"
+        "🗑️ **Delete Product:** `/delete [ID]`\n"
         "📊 **View Report:** `/report`\n"
         "📁 **Export Weekly File:** `/weekly_export`\n"
         "📁 **Export Monthly File:** `/monthly_export`"
@@ -333,6 +334,45 @@ async def edit_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(f"❌ Product ID {format_2digit(product_id)} not found.")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
+async def delete_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a product from inventory by ID"""
+    try:
+        args = context.args
+        if not args:
+            await update.message.reply_text("❌ Format: `/delete [ID]`\nExample: `/delete 01`", parse_mode="Markdown")
+            return
+            
+        product_id = extract_number(args[0])
+        
+        initialize_excel()
+        wb = openpyxl.load_workbook(EXCEL_FILE)
+        ws = wb["Inventory"]
+        
+        found_row = None
+        p_name = ""
+        
+        for row in range(2, ws.max_row + 1):
+            if ws.cell(row=row, column=1).value == product_id:
+                found_row = row
+                p_name = ws.cell(row=row, column=2).value
+                break
+                
+        if found_row:
+            ws.delete_rows(found_row)
+            sort_inventory_by_id(ws)
+            wb.save(EXCEL_FILE)
+            
+            await update.message.reply_text(
+                f"🗑️ **Product Deleted Successfully!**\n"
+                f"🆔 ID: {format_2digit(product_id)} | 🏷️ Name: {p_name}",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(f"❌ Product ID {format_2digit(product_id)} not found.")
+            
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
@@ -514,13 +554,14 @@ def main():
     app.add_handler(CommandHandler("new_product", register_new_product))
     app.add_handler(CommandHandler("new_multiple", register_multiple_products))
     app.add_handler(CommandHandler("edit", edit_product))
+    app.add_handler(CommandHandler("delete", delete_product))
     app.add_handler(CommandHandler("add", add_stock))
     app.add_handler(CommandHandler("sell", sell_product))
     app.add_handler(CommandHandler("report", get_report))
     app.add_handler(CommandHandler("weekly_export", export_weekly_file))
     app.add_handler(CommandHandler("monthly_export", export_monthly_file))
     
-    print("🤖 Telegram Bot running with Unit Support, Dummy Server & Value Tracking...")
+    print("🤖 Telegram Bot running with Unit Support, Delete Command & Dummy Server...")
     app.run_polling()
 
 if __name__ == "__main__":
