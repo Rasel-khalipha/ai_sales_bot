@@ -8,18 +8,16 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from pymongo import MongoClient
 
 # --- MongoDB Atlas কানেকশন স্ট্রিং ---
-# আপনার MongoDB Atlas কানেকশন স্ট্রিং এখানে বসিয়ে দিন (অথবা Render-এর Environment Variable-এ MONGO_URI নামে রাখতে পারেন)
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://mraselkhalifa_db_user:nUtzQOjFn0lXma7P@cluster0.3zchxnh.mongodb.net/")
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://mraselkhalifa_db_user:nUtzQOjFn0lXma7P@cluster0.3zchxnh.mongodb.net/salesbot_database?retryWrites=true&w=majority")
 client = MongoClient(MONGO_URI)
 
-# ডাটাবেস এবং কালেকশন (টেবিল) নির্বাচন
 db = client["salesbot_database"]
 inventory_collection = db["inventory"]
 sales_collection = db["sales_history"]
 
 TELEGRAM_TOKEN = "9104364470:AAFQxiPZuYBRvMgtpBDPQeSkzxpUZ31o_pU"  # আপনার টেলিগ্রাম বট টোকেন এখানে দিন
 
-# --- রেন্ডার পোর্টের রিকোয়েস্ট সামলানোর জন্য ডামি সার্ভার ---
+# --- ডামি সার্ভার (রেন্ডারের জন্য) ---
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -34,12 +32,11 @@ def run_dummy_server():
 # --- হেল্পার ও লজিক ফাংশনসমূহ ---
 
 def extract_number_and_unit(text):
-    """টেক্সট থেকে সংখ্যা এবং ইউনিট (Box/Ph/Pcs) আলাদা করা"""
     text_str = str(text).strip().lower()
     numbers = re.findall(r'\d+', text_str)
     qty = int(numbers[0]) if numbers else 0
     
-    unit = "box"  # ডিফল্ট ইউনিট
+    unit = "box"
     if "ph" in text_str:
         unit = "ph"
     elif "pc" in text_str or "pcs" in text_str:
@@ -50,20 +47,16 @@ def extract_number_and_unit(text):
     return qty, unit
 
 def extract_number(text):
-    """শুধুমাত্র সংখ্যা বের করার জন্য"""
     numbers = re.findall(r'\d+', str(text))
     return int(numbers[0]) if numbers else 0
 
 def format_2digit(val):
-    """এক ডিজিটের সংখ্যাকে দুই ডিজিটে রূপান্তর (যেমন: 3 -> '03')"""
     try:
-        num = int(val)
-        return f"{num:02d}"
+        return f"{int(val):02d}"
     except (ValueError, TypeError):
         return str(val)
 
 def parse_product_args(args):
-    """স্পেস থাকুক বা না থাকুক, সঠিকভাবে Name, Stock, Unit এবং Price আলাদা করবে"""
     unit_price = extract_number(args[-1])
     if args[-2].lower() in ["box", "ph", "pc", "pcs"] and len(args) >= 5:
         qty_unit_str = f"{args[-3]} {args[-2]}"
@@ -82,7 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🤖 **Smart Inventory & MongoDB Assistant**\n\n"
         "🆕 **Register Product:** `/new_product [ID] [Name] [Stock+Unit] [Price]`\n"
-        "   *(Example: `/new_product 01 Shirt 50 box 500`)*\n"
+        "📦 **Multiple Products:** `/new_multiple 01, Shirt, 50 pcs, 500; 02, Pant, 30 box, 800`\n"
         "📥 **Add Stock:** `/add [ID] [Qty+Unit]`\n"
         "🛒 **Sell Product:** `/sell [ID] [Qty+Unit]`\n"
         "✏️ **Edit Product:** `/edit [ID] [Name] [Stock+Unit] [Price]`\n"
@@ -102,7 +95,6 @@ async def register_new_product(update: Update, context: ContextTypes.DEFAULT_TYP
         product_name, initial_stock, unit_type, unit_price = parse_product_args(args)
         current_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
         
-        # আইডি ইতিমধ্যে আছে কি না চেক করা
         existing = inventory_collection.find_one({"product_id": product_id})
         if existing:
             await update.message.reply_text(f"⚠️ Product ID ({format_2digit(product_id)}) already exists!")
@@ -127,6 +119,57 @@ async def register_new_product(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
+# --- নতুন যুক্ত হওয়া মাল্টিপল প্রোডাক্ট হ্যান্ডলার ---
+async def register_multiple_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        full_text = update.message.text
+        # /new_multiple অংশটি বাদ দিয়ে বাকি টেক্সট নেওয়া
+        if " " not in full_text:
+            await update.message.reply_text("❌ Format: `/new_multiple ID, Name, Stock Unit, Price; ID, Name, Stock Unit, Price`", parse_mode="Markdown")
+            return
+            
+        data_string = full_text.split(" ", 1)[1]
+        items = data_string.split(";")
+        
+        success_count = 0
+        current_time = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+        
+        for item in items:
+            item = item.strip()
+            if not item:
+                continue
+            parts = [p.strip() for p in item.split(",")]
+            if len(parts) < 4:
+                continue # ফরম্যাট ভুল থাকলে স্কিপ করবে
+                
+            product_id = extract_number(parts[0])
+            product_name = parts[1]
+            stock_qty, unit_type = extract_number_and_unit(parts[2])
+            unit_price = extract_number(parts[3])
+            
+            # ডাটাবেসে ইতিমধ্যে থাকলে আপডেট বা স্কিপ, না থাকলে ইনসার্ট
+            inventory_collection.update_one(
+                {"product_id": product_id},
+                {
+                    "$set": {
+                        "product_name": product_name,
+                        "initial_stock": stock_qty,
+                        "unit_type": unit_type.upper(),
+                        "unit_price": unit_price,
+                        "last_updated": current_time
+                    },
+                    "$setOnInsert": {
+                        "daily_sold": 0
+                    }
+                },
+                upsert=True
+            )
+            success_count += 1
+            
+        await update.message.reply_text(f"✅ Successfully added/updated {success_count} products in MongoDB Atlas!")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error in multiple insert: {str(e)}")
 
 async def edit_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -274,7 +317,6 @@ async def get_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")
         
-        # আজকের মোট বিক্রির হিসাব
         daily_sales_qty, daily_sales_val = 0, 0
         all_sales = sales_collection.find()
         for sale in all_sales:
@@ -311,13 +353,14 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new_product", register_new_product))
+    app.add_handler(CommandHandler("new_multiple", register_multiple_products)) # নতুন হ্যান্ডলার যোগ করা হলো
     app.add_handler(CommandHandler("edit", edit_product))
     app.add_handler(CommandHandler("delete", delete_product))
     app.add_handler(CommandHandler("add", add_stock))
     app.add_handler(CommandHandler("sell", sell_product))
     app.add_handler(CommandHandler("report", get_report))
     
-    print("🤖 Telegram Bot running with MongoDB Atlas & Dummy Server...")
+    print("🤖 Telegram Bot running with MongoDB Atlas & Multiple Insert Support...")
     app.run_polling()
 
 if __name__ == "__main__":
